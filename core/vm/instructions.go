@@ -17,6 +17,8 @@
 package vm
 
 import (
+	"fmt"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
@@ -599,8 +601,9 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]
 		value        = callContext.stack.pop()
 		offset, size = callContext.stack.pop(), callContext.stack.pop()
 		input        = callContext.memory.GetCopy(int64(offset.Uint64()), int64(size.Uint64()))
-		gas          = callContext.contract.Gas
+		gas          = uint64(0)
 	)
+
 	if interpreter.evm.chainRules.IsEIP150 {
 		gas -= gas / 64
 	}
@@ -614,7 +617,7 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]
 		bigVal = value.ToBig()
 	}
 
-	res, addr, returnGas, suberr := interpreter.evm.Create(callContext.contract, input, gas, bigVal)
+	res, addr, returnGas, suberr := interpreter.evm.Create3(callContext.contract, input, gas, bigVal)
 	// Push item on the stack based on the returned error. If the ruleset is
 	// homestead we must check for CodeStoreOutOfGasError (homestead only
 	// rule) and treat as an error, if the ruleset is frontier we must
@@ -627,7 +630,7 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]
 		stackvalue.SetBytes(addr.Bytes())
 	}
 	callContext.stack.push(&stackvalue)
-	callContext.contract.Gas += returnGas
+	callContext.contract.Gas -= returnGas
 
 	if suberr == ErrExecutionReverted {
 		return res, nil
@@ -641,7 +644,7 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([
 		offset, size = callContext.stack.pop(), callContext.stack.pop()
 		salt         = callContext.stack.pop()
 		input        = callContext.memory.GetCopy(int64(offset.Uint64()), int64(size.Uint64()))
-		gas          = callContext.contract.Gas
+		gas          = uint64(0)
 	)
 
 	// Apply EIP150
@@ -654,7 +657,7 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([
 	if !endowment.IsZero() {
 		bigEndowment = endowment.ToBig()
 	}
-	res, addr, returnGas, suberr := interpreter.evm.Create2(callContext.contract, input, gas,
+	res, addr, returnGas, suberr := interpreter.evm.Create4(callContext.contract, input, gas,
 		bigEndowment, &salt)
 	// Push item on the stack based on the returned error.
 	if suberr != nil {
@@ -663,7 +666,7 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([
 		stackvalue.SetBytes(addr.Bytes())
 	}
 	callContext.stack.push(&stackvalue)
-	callContext.contract.Gas += returnGas
+	callContext.contract.Gas -= returnGas
 
 	if suberr == ErrExecutionReverted {
 		return res, nil
@@ -817,9 +820,30 @@ func opStop(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]by
 func opSuicide(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
 	beneficiary := callContext.stack.pop()
 	balance := interpreter.evm.StateDB.GetBalance(callContext.contract.Address())
-	interpreter.evm.StateDB.AddBalance(beneficiary.Bytes20(), balance)
+	if interpreter.evm.adapter != nil {
+		interpreter.evm.adapter.TransferTokens(callContext.contract.Address(), common.Address(beneficiary.Bytes20()), balance)
+	} else {
+		interpreter.evm.StateDB.AddBalance(beneficiary.Bytes20(), balance)
+	}
 	interpreter.evm.StateDB.Suicide(callContext.contract.Address())
 	return nil, nil
+}
+
+func opCallActor(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	inoffset, insize := callContext.stack.pop(), callContext.stack.pop()
+	params := callContext.memory.GetPtr(int64(inoffset.Uint64()), int64(insize.Uint64()))
+	method := callContext.stack.pop()
+	addr := callContext.stack.pop()
+
+	if interpreter.evm.adapter != nil {
+		result, err := interpreter.evm.adapter.CallAddress(common.Address(addr.Bytes20()), method, params)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+
+	return nil, fmt.Errorf("OPCALLACTOR disabled")
 }
 
 // following functions are used by the instruction jump  table
