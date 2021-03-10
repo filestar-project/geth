@@ -418,7 +418,22 @@ func gasStaticCall(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memo
 }
 
 func gasCallActor(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	return 0, nil
+	// Calculate gas for storage in memory
+	memoryGas, err := memoryGasCost(mem, memorySize)
+	if err != nil {
+		return 0, err
+	}
+	var (
+		gas      uint64
+		overflow bool
+	)
+	// Add price for Call
+	gas += params.CallActorGas
+
+	if gas, overflow = math.SafeAdd(gas, memoryGas); overflow {
+		return 0, ErrGasUintOverflow
+	}
+	return gas, nil
 }
 
 func gasSelfdestruct(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
