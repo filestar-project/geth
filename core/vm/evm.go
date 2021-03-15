@@ -124,7 +124,10 @@ type OpCodeAdapter interface {
 	CallAddress(common.Address, uint256.Int, []byte) ([]byte, error)
 	// CreateContract
 	CreateContract(from common.Address, code []byte, salt []byte, amount *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error)
-
+	//  SetStateDB
+	SetStateDB(StateDB)
+	//  SetCleanPointer
+	SetCleanPointer(bool)
 	// Balance managing
 	//// Transfer tokens (from, to, value)
 	TransferTokens(common.Address, common.Address, *big.Int)

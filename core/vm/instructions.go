@@ -617,7 +617,9 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]
 		bigVal = value.ToBig()
 	}
 
+	interpreter.evm.adapter.SetStateDB(interpreter.evm.StateDB)
 	res, addr, returnGas, suberr := interpreter.evm.Create3(callContext.contract, input, gas, bigVal)
+	interpreter.evm.adapter.SetCleanPointer(true)
 	// Push item on the stack based on the returned error. If the ruleset is
 	// homestead we must check for CodeStoreOutOfGasError (homestead only
 	// rule) and treat as an error, if the ruleset is frontier we must
@@ -657,8 +659,10 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([
 	if !endowment.IsZero() {
 		bigEndowment = endowment.ToBig()
 	}
+	interpreter.evm.adapter.SetStateDB(interpreter.evm.StateDB)
 	res, addr, returnGas, suberr := interpreter.evm.Create4(callContext.contract, input, gas,
 		bigEndowment, &salt)
+	interpreter.evm.adapter.SetCleanPointer(true)
 	// Push item on the stack based on the returned error.
 	if suberr != nil {
 		stackvalue.Clear()
@@ -836,7 +840,9 @@ func opCallActor(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) 
 	addr := callContext.stack.pop()
 
 	if interpreter.evm.adapter != nil {
+		interpreter.evm.adapter.SetStateDB(interpreter.evm.StateDB)
 		result, err := interpreter.evm.adapter.CallAddress(common.Address(addr.Bytes20()), method, params)
+		interpreter.evm.adapter.SetCleanPointer(true)
 		if err != nil {
 			return nil, err
 		}
