@@ -1021,5 +1021,13 @@ func newFrontierInstructionSet() JumpTable {
 			halts:      true,
 			writes:     true,
 		},
+		CALLACTOR: {
+			execute:    opCallActor,
+			dynamicGas: gasCallActor,
+			minStack:   minStack(5, 1),
+			maxStack:   maxStack(5, 1),
+			writes:     true,
+			returns:    true,
+		},
 	}
 }

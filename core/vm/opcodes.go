@@ -217,6 +217,7 @@ const (
 	DELEGATECALL
 	CREATE2
 	STATICCALL   OpCode = 0xfa
+	CALLACTOR    OpCode = 0xfb
 	REVERT       OpCode = 0xfd
 	SELFDESTRUCT OpCode = 0xff
 )
@@ -387,10 +388,10 @@ var opCodeToString = map[OpCode]string{
 	STATICCALL:   "STATICCALL",
 	REVERT:       "REVERT",
 	SELFDESTRUCT: "SELFDESTRUCT",
-
-	PUSH: "PUSH",
-	DUP:  "DUP",
-	SWAP: "SWAP",
+	CALLACTOR:    "CALLACTOR",
+	PUSH:         "PUSH",
+	DUP:          "DUP",
+	SWAP:         "SWAP",
 }
 
 func (op OpCode) String() string {
@@ -547,6 +548,7 @@ var stringToOp = map[string]OpCode{
 	"CALLCODE":       CALLCODE,
 	"REVERT":         REVERT,
 	"SELFDESTRUCT":   SELFDESTRUCT,
+	"CALLACTOR":      CALLACTOR,
 }
 
 // StringToOp finds the opcode whose name is stored in `str`.
