@@ -19,6 +19,7 @@ package vm
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -26,7 +27,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-fil-markets/storagemarket"
+	"github.com/filecoin-project/go-multistore"
+	"github.com/filecoin-project/specs-actors/v2/actors/runtime"
 	"github.com/holiman/uint256"
+	"github.com/ipfs/go-cid"
+	peer "github.com/libp2p/go-libp2p-peer"
 )
 
 // emptyCodeHash is used by create to ensure deployment is disallowed to already
@@ -120,18 +127,17 @@ type TxContext struct {
 }
 
 type OpCodeAdapter interface {
+	runtime.StorageHandle
 	// Blockchain access
 	CallAddress(common.Address, uint256.Int, []byte) ([]byte, error)
 	// CreateContract
 	CreateContract(from common.Address, code []byte, salt []byte, amount *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error)
-	//  SetStateDB
-	SetStateDB(StateDB)
-	//  SetCleanPointer
-	SetCleanPointer(bool)
 	// Balance managing
 	//// Transfer tokens (from, to, value)
 	TransferTokens(common.Address, common.Address, *big.Int)
 }
+
+var EmptyAdapterError = fmt.Errorf("Adapter doesn't init")
 
 // EVM is the Ethereum Virtual Machine base object and provides
 // the necessary tools to run a contract on the given state with
@@ -563,6 +569,76 @@ func (evm *EVM) Create3(caller ContractRef, code []byte, gas uint64, value *big.
 // Create4 creates a new contract, like Creat2, but calls OpCodeAdapter, not EVM create
 func (evm *EVM) Create4(caller ContractRef, code []byte, gas uint64, endowment *big.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	return evm.adapter.CreateContract(caller.Address(), code, salt.Bytes(), endowment)
+}
+
+func (e *EVM) ImportLocalStorage(path string, car bool) (multistore.StoreID, cid.Cid, error) {
+	if e.adapter != nil {
+		return e.adapter.ImportLocalStorage(path, car)
+	}
+	return 0, cid.Undef, EmptyAdapterError
+}
+
+func (e *EVM) DropLocalStorage(ids []multistore.StoreID) error {
+	if e.adapter != nil {
+		return e.adapter.DropLocalStorage(ids)
+	}
+	return EmptyAdapterError
+}
+
+func (e *EVM) ListLocalImports() ([]runtime.Import, error) {
+	if e.adapter != nil {
+		return e.adapter.ListLocalImports()
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) FindData(root cid.Cid, pieceCid *cid.Cid) ([]runtime.QueryOffer, bool, error) {
+	if e.adapter != nil {
+		return e.adapter.FindData(root, pieceCid)
+	}
+	return nil, false, EmptyAdapterError
+}
+
+func (e *EVM) RetrieveData(params runtime.RetrieveParams) error {
+	if e.adapter != nil {
+		return e.adapter.RetrieveData(params)
+	}
+	return EmptyAdapterError
+}
+
+func (e *EVM) InitDeal(params runtime.InitDealParams) (*cid.Cid, error) {
+	if e.adapter != nil {
+		return e.adapter.InitDeal(params)
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) QueryAsk(maddr address.Address, pid peer.ID) (*storagemarket.StorageAsk, error) {
+	if e.adapter != nil {
+		return e.adapter.QueryAsk(maddr, pid)
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) ListDeals() ([]runtime.DealInfo, error) {
+	if e.adapter != nil {
+		return e.adapter.ListDeals()
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) GetDeal(propCid cid.Cid) (runtime.Deal, error) {
+	if e.adapter != nil {
+		return e.adapter.GetDeal(propCid)
+	}
+	return runtime.Deal{}, EmptyAdapterError
+}
+
+func (e *EVM) ListAsks() ([]*storagemarket.StorageAsk, error) {
+	if e.adapter != nil {
+		return e.adapter.ListAsks()
+	}
+	return nil, EmptyAdapterError
 }
 
 // ChainConfig returns the environment's chain configuration

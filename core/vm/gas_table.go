@@ -458,3 +458,43 @@ func gasSelfdestruct(evm *EVM, contract *Contract, stack *Stack, mem *Memory, me
 	}
 	return gas, nil
 }
+
+func gasImportLocalStorage(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasDropLocalStorage(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasListLocalImports(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasFindData(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasRetrieveData(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasInitDeal(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasQueryAsk(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasListDeals(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasGetDeal(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}
+
+func gasListAsks(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
+	return 0, nil
+}

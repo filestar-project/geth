@@ -22,7 +22,14 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-fil-markets/storagemarket"
+	"github.com/filecoin-project/go-multistore"
+	"github.com/filecoin-project/go-state-types/big"
+	"github.com/filecoin-project/specs-actors/v2/actors/runtime"
 	"github.com/holiman/uint256"
+	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p-core/peer"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -616,10 +623,7 @@ func opCreate(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]
 	if !value.IsZero() {
 		bigVal = value.ToBig()
 	}
-
-	interpreter.evm.adapter.SetStateDB(interpreter.evm.StateDB)
 	res, addr, returnGas, suberr := interpreter.evm.Create3(callContext.contract, input, gas, bigVal)
-	interpreter.evm.adapter.SetCleanPointer(true)
 	// Push item on the stack based on the returned error. If the ruleset is
 	// homestead we must check for CodeStoreOutOfGasError (homestead only
 	// rule) and treat as an error, if the ruleset is frontier we must
@@ -659,10 +663,8 @@ func opCreate2(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([
 	if !endowment.IsZero() {
 		bigEndowment = endowment.ToBig()
 	}
-	interpreter.evm.adapter.SetStateDB(interpreter.evm.StateDB)
 	res, addr, returnGas, suberr := interpreter.evm.Create4(callContext.contract, input, gas,
 		bigEndowment, &salt)
-	interpreter.evm.adapter.SetCleanPointer(true)
 	// Push item on the stack based on the returned error.
 	if suberr != nil {
 		stackvalue.Clear()
@@ -840,16 +842,213 @@ func opCallActor(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) 
 	addr := callContext.stack.pop()
 
 	if interpreter.evm.adapter != nil {
-		interpreter.evm.adapter.SetStateDB(interpreter.evm.StateDB)
-		result, err := interpreter.evm.adapter.CallAddress(common.Address(addr.Bytes20()), method, params)
-		interpreter.evm.adapter.SetCleanPointer(true)
-		if err != nil {
-			return nil, err
-		}
-		return result, nil
+		return interpreter.evm.adapter.CallAddress(common.Address(addr.Bytes20()), method, params)
 	}
 
 	return nil, fmt.Errorf("OPCALLACTOR disabled")
+}
+
+// OpCodes for interate with storage API
+func opImportLocalStorage(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	car := callContext.stack.pop()
+	inoffset, insize := callContext.stack.pop(), callContext.stack.pop()
+	path := callContext.memory.GetPtr(int64(inoffset.Uint64()), int64(insize.Uint64()))
+	_, _, err := interpreter.evm.ImportLocalStorage(string(path), !car.IsZero())
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+func opDropLocalStorage(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	id := callContext.stack.pop()
+	return nil, interpreter.evm.DropLocalStorage([]multistore.StoreID{multistore.StoreID(id.Uint64())})
+}
+func opListLocalImports(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	// Add type to return
+	_, err := interpreter.evm.ListLocalImports()
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+func opFindData(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	pieceCidOffset, pieceCidSize := callContext.stack.pop(), callContext.stack.pop()
+	pieceBytes := callContext.memory.GetPtr(int64(pieceCidOffset.Uint64()), int64(pieceCidSize.Uint64()))
+
+	rootOffset, rootSize := callContext.stack.pop(), callContext.stack.pop()
+	rootBytes := callContext.memory.GetPtr(int64(rootOffset.Uint64()), int64(rootSize.Uint64()))
+
+	root, err := cid.Decode(string(rootBytes))
+	if err != nil {
+		return nil, err
+	}
+	pieceCid, err := cid.Decode(string(pieceBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	// Add type to return
+	_, isLocal, err := interpreter.evm.FindData(root, &pieceCid)
+	if err != nil {
+		return nil, err
+	}
+	local := uint256.NewInt()
+	if isLocal {
+		local = local.SetOne()
+	}
+	callContext.stack.push(local)
+	return nil, nil
+}
+func opRetrieveData(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	car := callContext.stack.pop()
+	// may be change it to uint256?
+	price := callContext.stack.pop()
+
+	payerAddr := callContext.stack.pop()
+
+	pieceCidOffset, pieceCidSize := callContext.stack.pop(), callContext.stack.pop()
+	pieceCidBytes := callContext.memory.GetPtr(int64(pieceCidOffset.Uint64()), int64(pieceCidSize.Uint64()))
+
+	minerAddrOffset, minerAddrSize := callContext.stack.pop(), callContext.stack.pop()
+	minerAddr := callContext.memory.GetPtr(int64(minerAddrOffset.Uint64()), int64(minerAddrSize.Uint64()))
+
+	pathOffset, pathSize := callContext.stack.pop(), callContext.stack.pop()
+	path := callContext.memory.GetPtr(int64(pathOffset.Uint64()), int64(pathSize.Uint64()))
+
+	dataCidOffset, dataCidSize := callContext.stack.pop(), callContext.stack.pop()
+	dataCidBytes := callContext.memory.GetPtr(int64(dataCidOffset.Uint64()), int64(dataCidSize.Uint64()))
+
+	dataCid, err := cid.Decode(string(dataCidBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	payer, err := address.NewSecp256k1Address(payerAddr.Bytes())
+	if err != nil {
+		return nil, err
+	}
+
+	miner, err := address.NewFromString(string(minerAddr))
+	if err != nil {
+		return nil, err
+	}
+
+	pieceCid, err := cid.Decode(string(pieceCidBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	return nil, interpreter.evm.RetrieveData(runtime.RetrieveParams{
+		DataCid:    dataCid,
+		OutputPath: string(path),
+		Payer:      payer,
+		MinerAddr:  miner,
+		PieceCid:   &pieceCid,
+		MaxPrice:   big.PositiveFromUnsignedBytes(price.Bytes()),
+		Car:        !car.IsZero(),
+	})
+}
+func opInitDeal(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	fromAddr := callContext.stack.pop()
+	fastRetrieval := callContext.stack.pop()
+	verifiedDealParam := callContext.stack.pop()
+	startEpoch := callContext.stack.pop()
+	duration := callContext.stack.pop()
+	price := callContext.stack.pop()
+
+	provOffset, provSize := callContext.stack.pop(), callContext.stack.pop()
+	provBytes := callContext.memory.GetPtr(int64(provOffset.Uint64()), int64(provSize.Uint64()))
+
+	minerAddrOffset, minerAddrSize := callContext.stack.pop(), callContext.stack.pop()
+	minerAddr := callContext.memory.GetPtr(int64(minerAddrOffset.Uint64()), int64(minerAddrSize.Uint64()))
+
+	dataCidOffset, dataCidSize := callContext.stack.pop(), callContext.stack.pop()
+	dataCidBytes := callContext.memory.GetPtr(int64(dataCidOffset.Uint64()), int64(dataCidSize.Uint64()))
+
+	dataCid, err := cid.Decode(string(dataCidBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	miner, err := address.NewFromString(string(minerAddr))
+	if err != nil {
+		return nil, err
+	}
+
+	from, err := address.NewFromBytes(append([]byte{address.SECP256K1}, fromAddr.Bytes()...))
+	if err != nil {
+		return nil, err
+	}
+
+	ref := &storagemarket.DataRef{
+		TransferType: storagemarket.TTGraphsync,
+		Root:         dataCid,
+	}
+
+	prov, err := big.FromString(string(provBytes))
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = interpreter.evm.InitDeal(runtime.InitDealParams{
+		DataCid:           dataCid,
+		Miner:             miner,
+		Price:             big.PositiveFromUnsignedBytes(price.Bytes()),
+		Duration:          int64(duration.Uint64()),
+		StartEpoch:        startEpoch.ToBig().Int64(),
+		VerifiedDealParam: !verifiedDealParam.IsZero(),
+		FastRetrieval:     !fastRetrieval.IsZero(),
+		ProvCol:           prov,
+		From:              from,
+		Ref:               ref,
+	})
+	return nil, err
+}
+func opQueryAsk(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	minerAddr := callContext.stack.pop()
+	idOffset, idSize := callContext.stack.pop(), callContext.stack.pop()
+	idBytes := callContext.memory.GetPtr(int64(idOffset.Uint64()), int64(idSize.Uint64()))
+	miner, err := address.NewFromBytes(minerAddr.Bytes())
+	if err != nil {
+		return nil, err
+	}
+	// Add struct to types
+	_, err = interpreter.evm.QueryAsk(miner, peer.ID(string(idBytes)))
+	if err != nil {
+		return nil, err
+	}
+	return nil, err
+}
+func opListDeals(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	// Add struct to types
+	_, err := interpreter.evm.ListDeals()
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+func opGetDeal(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	dataCidOffset, dataCidSize := callContext.stack.pop(), callContext.stack.pop()
+	dataCidBytes := callContext.memory.GetPtr(int64(dataCidOffset.Uint64()), int64(dataCidSize.Uint64()))
+
+	dataCid, err := cid.Decode(string(dataCidBytes))
+	if err != nil {
+		return nil, err
+	}
+	// Add struct to types
+	_, err = interpreter.evm.GetDeal(dataCid)
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+func opListAsks(pc *uint64, interpreter *EVMInterpreter, callContext *callCtx) ([]byte, error) {
+	// Add struct to types
+	_, err := interpreter.evm.ListAsks()
+	if err != nil {
+		return nil, err
+	}
+	return nil, nil
 }
 
 // following functions are used by the instruction jump  table
