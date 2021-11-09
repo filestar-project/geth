@@ -17,7 +17,9 @@
 package vm
 
 import (
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync/atomic"
 	"time"
@@ -25,7 +27,13 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/filecoin-project/go-address"
+	"github.com/filecoin-project/go-fil-markets/storagemarket"
+	"github.com/filecoin-project/go-multistore"
+	"github.com/filecoin-project/specs-actors/v2/actors/runtime"
 	"github.com/holiman/uint256"
+	"github.com/ipfs/go-cid"
+	peer "github.com/libp2p/go-libp2p-peer"
 )
 
 // emptyCodeHash is used by create to ensure deployment is disallowed to already
@@ -118,6 +126,19 @@ type TxContext struct {
 	GasPrice *big.Int       // Provides information for GASPRICE
 }
 
+type OpCodeAdapter interface {
+	runtime.StorageHandle
+	// Blockchain access
+	CallAddress(common.Address, uint256.Int, []byte) ([]byte, error)
+	// CreateContract
+	CreateContract(from common.Address, code []byte, salt []byte, amount *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error)
+	// Balance managing
+	//// Transfer tokens (from, to, value)
+	TransferTokens(common.Address, common.Address, *big.Int)
+}
+
+var EmptyAdapterError = fmt.Errorf("Adapter doesn't init")
+
 // EVM is the Ethereum Virtual Machine base object and provides
 // the necessary tools to run a contract on the given state with
 // the provided context. It should be noted that any error
@@ -135,6 +156,8 @@ type EVM struct {
 	StateDB StateDB
 	// Depth is the current call stack
 	depth int
+	// OpCodeAdapter interface
+	adapter OpCodeAdapter
 
 	// chainConfig contains information about the current chain
 	chainConfig *params.ChainConfig
@@ -159,9 +182,16 @@ type EVM struct {
 // NewEVM returns a new EVM. The returned EVM is not thread safe and should
 // only ever be used *once*.
 func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
+	return NewEVMWithAdapter(nil, blockCtx, txCtx, statedb, chainConfig, vmConfig)
+}
+
+// NewEVM returns a new EVM. The returned EVM is not thread safe and should
+// only ever be used *once*.
+func NewEVMWithAdapter(adapter OpCodeAdapter, blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig *params.ChainConfig, vmConfig Config) *EVM {
 	evm := &EVM{
 		Context:      blockCtx,
 		TxContext:    txCtx,
+		adapter:      adapter,
 		StateDB:      statedb,
 		vmConfig:     vmConfig,
 		chainConfig:  chainConfig,
@@ -236,15 +266,12 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 	p, isPrecompile := evm.precompile(addr)
 
 	if !evm.StateDB.Exist(addr) {
-		if !isPrecompile && evm.chainRules.IsEIP158 && value.Sign() == 0 {
-			// Calling a non existing account, don't do anything, but ping the tracer
-			if evm.vmConfig.Debug && evm.depth == 0 {
-				evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, value)
-				evm.vmConfig.Tracer.CaptureEnd(ret, 0, 0, nil)
-			}
-			return nil, gas, nil
+		// Calling a non existing account, don't do anything, but ping the tracer
+		if evm.vmConfig.Debug && evm.depth == 0 {
+			evm.vmConfig.Tracer.CaptureStart(caller.Address(), addr, false, input, gas, value)
+			evm.vmConfig.Tracer.CaptureEnd(ret, 0, 0, nil)
 		}
-		evm.StateDB.CreateAccount(addr)
+		return nil, gas, nil
 	}
 	evm.Context.Transfer(evm.StateDB, caller.Address(), addr, value)
 
@@ -433,7 +460,7 @@ func (c *codeAndHash) Hash() common.Hash {
 }
 
 // create creates a new contract using code as deployment code.
-func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64, value *big.Int, address common.Address) ([]byte, common.Address, uint64, error) {
+func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64, value *big.Int, address common.Address, salt []byte) ([]byte, common.Address, uint64, error) {
 	// Depth check execution. Fail if we're trying to execute above the
 	// limit.
 	if evm.depth > int(params.CallCreateDepth) {
@@ -442,8 +469,7 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 	if !evm.Context.CanTransfer(evm.StateDB, caller.Address(), value) {
 		return nil, common.Address{}, gas, ErrInsufficientBalance
 	}
-	nonce := evm.StateDB.GetNonce(caller.Address())
-	evm.StateDB.SetNonce(caller.Address(), nonce+1)
+
 	// We add this to the access list _before_ taking a snapshot. Even if the creation fails,
 	// the access-list change should not be rolled back
 	if evm.chainRules.IsYoloV3 {
@@ -515,8 +541,11 @@ func (evm *EVM) create(caller ContractRef, codeAndHash *codeAndHash, gas uint64,
 
 // Create creates a new contract using code as deployment code.
 func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
-	contractAddr = crypto.CreateAddress(caller.Address(), evm.StateDB.GetNonce(caller.Address()))
-	return evm.create(caller, &codeAndHash{code: code}, gas, value, contractAddr)
+	nonce := evm.StateDB.GetNonce(caller.Address())
+	saltFromNonce := make([]byte, 8)
+	binary.LittleEndian.PutUint64(saltFromNonce, nonce)
+	contractAddr = crypto.CreateAddress(caller.Address(), nonce)
+	return evm.create(caller, &codeAndHash{code: code}, gas, value, contractAddr, saltFromNonce)
 }
 
 // Create2 creates a new contract using code as deployment code.
@@ -526,7 +555,90 @@ func (evm *EVM) Create(caller ContractRef, code []byte, gas uint64, value *big.I
 func (evm *EVM) Create2(caller ContractRef, code []byte, gas uint64, endowment *big.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
 	codeAndHash := &codeAndHash{code: code}
 	contractAddr = crypto.CreateAddress2(caller.Address(), salt.Bytes32(), codeAndHash.Hash().Bytes())
-	return evm.create(caller, codeAndHash, gas, endowment, contractAddr)
+	return evm.create(caller, codeAndHash, gas, endowment, contractAddr, salt.Bytes())
+}
+
+// Create3 creates a new contract, like Create2, but uses Nonce as salt and calls OpCodeAdapter, not EVM create
+func (evm *EVM) Create3(caller ContractRef, code []byte, gas uint64, value *big.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
+	nonce := evm.StateDB.GetNonce(caller.Address())
+	saltFromNonce := make([]byte, 8)
+	binary.LittleEndian.PutUint64(saltFromNonce, nonce)
+	return evm.adapter.CreateContract(caller.Address(), code, saltFromNonce, value)
+}
+
+// Create4 creates a new contract, like Creat2, but calls OpCodeAdapter, not EVM create
+func (evm *EVM) Create4(caller ContractRef, code []byte, gas uint64, endowment *big.Int, salt *uint256.Int) (ret []byte, contractAddr common.Address, leftOverGas uint64, err error) {
+	return evm.adapter.CreateContract(caller.Address(), code, salt.Bytes(), endowment)
+}
+
+func (e *EVM) ImportLocalStorage(path string, car bool) (multistore.StoreID, cid.Cid, error) {
+	if e.adapter != nil {
+		return e.adapter.ImportLocalStorage(path, car)
+	}
+	return 0, cid.Undef, EmptyAdapterError
+}
+
+func (e *EVM) DropLocalStorage(ids []multistore.StoreID) error {
+	if e.adapter != nil {
+		return e.adapter.DropLocalStorage(ids)
+	}
+	return EmptyAdapterError
+}
+
+func (e *EVM) ListLocalImports() ([]runtime.Import, error) {
+	if e.adapter != nil {
+		return e.adapter.ListLocalImports()
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) FindData(root cid.Cid, pieceCid *cid.Cid) ([]runtime.QueryOffer, bool, error) {
+	if e.adapter != nil {
+		return e.adapter.FindData(root, pieceCid)
+	}
+	return nil, false, EmptyAdapterError
+}
+
+func (e *EVM) RetrieveData(params runtime.RetrieveParams) error {
+	if e.adapter != nil {
+		return e.adapter.RetrieveData(params)
+	}
+	return EmptyAdapterError
+}
+
+func (e *EVM) InitDeal(params runtime.InitDealParams) (*cid.Cid, error) {
+	if e.adapter != nil {
+		return e.adapter.InitDeal(params)
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) QueryAsk(maddr address.Address, pid peer.ID) (*storagemarket.StorageAsk, error) {
+	if e.adapter != nil {
+		return e.adapter.QueryAsk(maddr, pid)
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) ListDeals() ([]runtime.DealInfo, error) {
+	if e.adapter != nil {
+		return e.adapter.ListDeals()
+	}
+	return nil, EmptyAdapterError
+}
+
+func (e *EVM) GetDeal(propCid cid.Cid) (runtime.Deal, error) {
+	if e.adapter != nil {
+		return e.adapter.GetDeal(propCid)
+	}
+	return runtime.Deal{}, EmptyAdapterError
+}
+
+func (e *EVM) ListAsks() ([]*storagemarket.StorageAsk, error) {
+	if e.adapter != nil {
+		return e.adapter.ListAsks()
+	}
+	return nil, EmptyAdapterError
 }
 
 // ChainConfig returns the environment's chain configuration
